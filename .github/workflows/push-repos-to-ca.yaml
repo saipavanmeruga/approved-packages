@@ -1,0 +1,83 @@
+```yaml
+name: Upload Approved Packages to CodeArtifact
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "required_packages.txt"
+
+jobs:
+  upload-packages:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<CodeArtifactUploaderRole>
+          aws-region: us-east-1
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install awscli
+
+      - name: Upload approved packages (source only)
+        run: |
+          DOMAIN="my-domain"
+          REPO="my-pypi-repo"
+
+          mkdir -p approved_pkgs
+
+          while IFS= read -r line; do
+            pkg=$(echo "$line" | cut -d= -f1)
+            ver=$(echo "$line" | cut -d= -f3)
+
+            echo "Processing $pkg==$ver ..."
+
+            # Check if package version already exists in CodeArtifact
+            exists=$(aws codeartifact list-package-versions \
+              --domain "$DOMAIN" \
+              --repository "$REPO" \
+              --format pypi \
+              --package "$pkg" \
+              --query "versions[?version=='$ver']" \
+              --output text)
+
+            if [ -n "$exists" ]; then
+              echo "$pkg==$ver already exists, skipping."
+              continue
+            fi
+
+            # Download only source distribution
+            pip download "$pkg==$ver" -d approved_pkgs --no-binary=:all:
+
+            # Upload all source artifacts (.tar.gz, .zip)
+            for file in approved_pkgs/${pkg//-/_}-$ver*; do
+              fname=$(basename "$file")
+              echo "Uploading $fname ..."
+              aws codeartifact publish-package-version \
+                --domain "$DOMAIN" \
+                --repository "$REPO" \
+                --format pypi \
+                --package "$pkg" \
+                --package-version "$ver" \
+                --asset-name "$fname" \
+                --asset fileb://"$file"
+            done
+
+          done < approved_packages.txt
+```
